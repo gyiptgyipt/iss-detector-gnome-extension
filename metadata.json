@@ -1,0 +1,6 @@
+{
+  "uuid": "iss-detector@local",
+  "name": "ISS Detector",
+  "description": "Notify you 10 minutes before the ISS passes overhead (manual or dynamic location).",
+  "shell-version": ["42"]
+}

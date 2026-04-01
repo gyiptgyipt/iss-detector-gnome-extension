@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="512" viewBox="0 0 1024 512">
+  <rect width="1024" height="512" fill="#8fb9d9"/>
+  <g fill="#7fb070">
+    <!-- North America (simplified) -->
+    <path d="M80,110 L220,80 L300,120 L260,180 L180,200 L120,170 Z"/>
+    <path d="M250,210 L300,220 L320,260 L280,280 L240,250 Z"/>
+    <!-- South America -->
+    <path d="M300,260 L340,280 L360,340 L330,410 L300,390 L280,330 Z"/>
+    <!-- Europe -->
+    <path d="M480,120 L540,110 L580,140 L550,170 L500,170 Z"/>
+    <!-- Africa -->
+    <path d="M520,180 L590,200 L620,260 L590,340 L520,330 L480,260 Z"/>
+    <!-- Asia -->
+    <path d="M580,120 L760,120 L840,180 L820,240 L700,260 L620,220 Z"/>
+    <!-- India -->
+    <path d="M640,260 L680,280 L670,320 L620,300 Z"/>
+    <!-- Australia -->
+    <path d="M780,330 L850,340 L880,380 L840,420 L770,400 Z"/>
+    <!-- Greenland -->
+    <path d="M300,40 L360,30 L400,60 L360,80 L300,70 Z"/>
+  </g>
+  <g stroke="#ffffff" stroke-opacity="0.15" stroke-width="1">
+    <line x1="0" y1="128" x2="1024" y2="128"/>
+    <line x1="0" y1="256" x2="1024" y2="256"/>
+    <line x1="0" y1="384" x2="1024" y2="384"/>
+    <line x1="256" y1="0" x2="256" y2="512"/>
+    <line x1="512" y1="0" x2="512" y2="512"/>
+    <line x1="768" y1="0" x2="768" y2="512"/>
+  </g>
+</svg>
