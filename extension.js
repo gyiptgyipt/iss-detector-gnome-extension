@@ -1,6 +1,13 @@
 /* exported init enable disable */
 
 const { GLib, Soup, Geoclue, Gio, Clutter, St, GdkPixbuf } = imports.gi;
+const Cairo = imports.cairo;
+let Rsvg = null;
+try {
+  Rsvg = imports.gi.Rsvg;
+} catch (e) {
+  Rsvg = null;
+}
 let Gdk = null;
 try {
   Gdk = imports.gi.Gdk;
@@ -20,6 +27,8 @@ const API_COUNT = 5;
 
 const MAP_WIDTH = 320;
 const MAP_HEIGHT = 180;
+const USE_360_LONGITUDE = true;
+const USE_SIMPLE_WATER_MAP = false;
 
 let _timeoutId = 0;
 let _issTimerId = 0;
@@ -41,8 +50,15 @@ let _manualLat = null;
 let _manualLon = null;
 let _styleSheet = null;
 let _mapPixbuf = null;
+let _mapSurface = null;
+let _mapSurfaceW = 0;
+let _mapSurfaceH = 0;
+let _mapSurfacePath = '';
+let _mapBaseW = 0;
+let _mapBaseH = 0;
 
 let _issHistory = [];
+let _issLatest = null;
 
 const CONFIG_DIR = GLib.build_filenamev([GLib.get_user_config_dir(), 'iss-detector']);
 const CONFIG_FILE = GLib.build_filenamev([CONFIG_DIR, 'config.ini']);
@@ -109,7 +125,14 @@ function disable() {
   _manualLat = null;
   _manualLon = null;
   _issHistory = [];
+  _issLatest = null;
   _mapPixbuf = null;
+  _mapSurface = null;
+  _mapSurfaceW = 0;
+  _mapSurfaceH = 0;
+  _mapSurfacePath = '';
+  _mapBaseW = 0;
+  _mapBaseH = 0;
   _lastNotifiedRise = 0;
   _notifiedPermissionError = false;
 }
@@ -219,9 +242,11 @@ function _fetchIssPosition() {
       return;
 
     _issHistory.push({ lat, lon, ts });
-    if (_issHistory.length > 120)
+    _issLatest = { lat, lon, ts };
+    if (_issHistory.length > 360)
       _issHistory.shift();
 
+    _updateIssStatus();
     _invalidateMap();
   });
 }
@@ -308,6 +333,16 @@ function _setStatus(text) {
     _statusLabel.text = text;
 }
 
+function _updateIssStatus() {
+  if (!_issLatest || !_statusLabel)
+    return;
+  const dt = GLib.DateTime.new_from_unix_utc(_issLatest.ts);
+  const timeStr = dt ? dt.format('%Y-%m-%d %H:%M UTC') : '';
+  const latStr = _issLatest.lat.toFixed(4);
+  const lonStr = _issLatest.lon.toFixed(4);
+  _statusLabel.text = `ISS: ${latStr}, ${lonStr} @ ${timeStr}`;
+}
+
 function _updateNextPass(passes) {
   const now = Math.floor(Date.now() / 1000);
   let next = null;
@@ -338,6 +373,7 @@ function _updateNextPass(passes) {
   }
 
   _setStatus('Tracking ISS passes.');
+  _updateIssStatus();
 }
 
 function _invalidateMap() {
@@ -349,26 +385,57 @@ function _drawMap(canvas, cr, width, height) {
   cr.setSourceRGBA(0, 0, 0, 0);
   cr.paint();
 
-  if (!GdkPixbuf) {
-    cr.setSourceRGBA(1, 1, 1, 0.6);
-    cr.selectFontFace('Sans', 0, 0);
-    cr.setFontSize(12);
-    cr.moveTo(10, 20);
-    cr.showText('GdkPixbuf not available.');
-    return true;
-  }
-
   const ext = ExtensionUtils.getCurrentExtension();
-  const mapPath = GLib.build_filenamev([ext.path, 'assets', 'world-map.svg']);
+  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', 'color_map.svg.org.svg']);
+  const mapPathSecondary = GLib.build_filenamev([ext.path, 'assets', 'color_map.svg']);
+  const mapPathFallback = GLib.build_filenamev([ext.path, 'assets', 'world-map.svg']);
+  const mapPath = GLib.file_test(mapPathPrimary, GLib.FileTest.EXISTS)
+    ? mapPathPrimary
+    : (GLib.file_test(mapPathSecondary, GLib.FileTest.EXISTS) ? mapPathSecondary : mapPathFallback);
+  const isSvg = mapPath.toLowerCase().endsWith('.svg');
 
   try {
-    if (!_mapPixbuf) {
-      const base = GdkPixbuf.Pixbuf.new_from_file(mapPath);
-      _mapPixbuf = base.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR);
-    }
-    if (Gdk && _mapPixbuf) {
-      Gdk.cairo_set_source_pixbuf(cr, _mapPixbuf, 0, 0);
+    if (USE_SIMPLE_WATER_MAP) {
+      cr.setSourceRGBA(0.45, 0.67, 0.86, 1); // water blue
+      cr.rectangle(0, 0, width, height);
+      cr.fill();
+    } else if (isSvg && Rsvg) {
+      if (!_mapSurface || _mapSurfaceW !== width || _mapSurfaceH !== height || _mapSurfacePath !== mapPath) {
+        const handle = Rsvg.Handle.new_from_file(mapPath);
+        const dims = handle.get_dimensions ? handle.get_dimensions() : null;
+        const baseW = dims && dims.width ? dims.width : width;
+        const baseH = dims && dims.height ? dims.height : height;
+        _mapBaseW = baseW;
+        _mapBaseH = baseH;
+        _mapSurface = new Cairo.ImageSurface(Cairo.Format.ARGB32, width, height);
+        const ctx = new Cairo.Context(_mapSurface);
+        ctx.scale(width / baseW, height / baseH);
+        handle.render_cairo(ctx);
+        _mapSurfaceW = width;
+        _mapSurfaceH = height;
+        _mapSurfacePath = mapPath;
+      }
+      cr.setSourceSurface(_mapSurface, 0, 0);
       cr.paint();
+    } else {
+      if (!GdkPixbuf) {
+        cr.setSourceRGBA(1, 1, 1, 0.6);
+        cr.selectFontFace('Sans', 0, 0);
+        cr.setFontSize(12);
+        cr.moveTo(10, 20);
+        cr.showText('GdkPixbuf not available.');
+        return true;
+      }
+      if (!_mapPixbuf) {
+        const base = GdkPixbuf.Pixbuf.new_from_file(mapPath);
+        _mapBaseW = base.get_width();
+        _mapBaseH = base.get_height();
+        _mapPixbuf = base.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR);
+      }
+      if (Gdk && _mapPixbuf) {
+        Gdk.cairo_set_source_pixbuf(cr, _mapPixbuf, 0, 0);
+        cr.paint();
+      }
     }
   } catch (e) {
     cr.setSourceRGBA(0.15, 0.17, 0.2, 1);
@@ -408,7 +475,12 @@ function _drawMap(canvas, cr, width, height) {
 }
 
 function _lonToX(lon, width) {
-  return (lon + 180) / 360 * width;
+  let adjLon = lon;
+  if (USE_360_LONGITUDE && adjLon < 0)
+    adjLon += 360;
+  if (USE_360_LONGITUDE)
+    return (adjLon / 360) * width;
+  return (adjLon + 180) / 360 * width;
 }
 
 function _latToY(lat, height) {
