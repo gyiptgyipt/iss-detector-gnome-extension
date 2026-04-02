@@ -27,7 +27,8 @@ const API_COUNT = 5;
 
 const MAP_WIDTH = 320;
 const MAP_HEIGHT = 180;
-const USE_360_LONGITUDE = true;
+const ISS_ICON_SIZE = 12;
+const USE_360_LONGITUDE = false;
 const USE_SIMPLE_WATER_MAP = false;
 
 let _timeoutId = 0;
@@ -56,6 +57,9 @@ let _mapSurfaceH = 0;
 let _mapSurfacePath = '';
 let _mapBaseW = 0;
 let _mapBaseH = 0;
+let _issIconSurface = null;
+let _issIconSize = 0;
+let _issIconPath = '';
 
 let _issHistory = [];
 let _issLatest = null;
@@ -133,6 +137,9 @@ function disable() {
   _mapSurfacePath = '';
   _mapBaseW = 0;
   _mapBaseH = 0;
+  _issIconSurface = null;
+  _issIconSize = 0;
+  _issIconPath = '';
   _lastNotifiedRise = 0;
   _notifiedPermissionError = false;
 }
@@ -386,12 +393,11 @@ function _drawMap(canvas, cr, width, height) {
   cr.paint();
 
   const ext = ExtensionUtils.getCurrentExtension();
-  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', 'color_map.svg.org.svg']);
-  const mapPathSecondary = GLib.build_filenamev([ext.path, 'assets', 'color_map.svg']);
+  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', 'map.png']);
   const mapPathFallback = GLib.build_filenamev([ext.path, 'assets', 'world-map.svg']);
   const mapPath = GLib.file_test(mapPathPrimary, GLib.FileTest.EXISTS)
     ? mapPathPrimary
-    : (GLib.file_test(mapPathSecondary, GLib.FileTest.EXISTS) ? mapPathSecondary : mapPathFallback);
+    : mapPathFallback;
   const isSvg = mapPath.toLowerCase().endsWith('.svg');
 
   try {
@@ -448,16 +454,37 @@ function _drawMap(canvas, cr, width, height) {
   if (_issHistory.length > 1) {
     cr.setLineWidth(2);
     cr.setSourceRGBA(1, 0.3, 0.3, 0.9);
-    let started = false;
+    let prev = null;
     for (const pt of _issHistory) {
       const sx = _lonToX(pt.lon, width);
       const sy = _latToY(pt.lat, height);
-      if (!started) {
+      if (!prev) {
         cr.moveTo(sx, sy);
-        started = true;
+        prev = pt;
+        continue;
+      }
+
+      const dlon = pt.lon - prev.lon;
+      const crossesDateline = Math.abs(dlon) > 180;
+      if (crossesDateline && !USE_360_LONGITUDE) {
+        const lon2Adj = prev.lon > 0 && pt.lon < 0 ? pt.lon + 360
+          : (prev.lon < 0 && pt.lon > 0 ? pt.lon - 360 : pt.lon);
+        const edgeLon = lon2Adj > prev.lon ? 180 : -180;
+        const t = (edgeLon - prev.lon) / (lon2Adj - prev.lon);
+        const latEdge = prev.lat + t * (pt.lat - prev.lat);
+
+        const edgeX = edgeLon === 180 ? width : 0;
+        const edgeY = _latToY(latEdge, height);
+        cr.lineTo(edgeX, edgeY);
+
+        const wrapX = edgeLon === 180 ? 0 : width;
+        cr.moveTo(wrapX, edgeY);
+        cr.lineTo(sx, sy);
       } else {
         cr.lineTo(sx, sy);
       }
+
+      prev = pt;
     }
     cr.stroke();
 
@@ -465,9 +492,39 @@ function _drawMap(canvas, cr, width, height) {
     if (last) {
       const sx = _lonToX(last.lon, width);
       const sy = _latToY(last.lat, height);
-      cr.setSourceRGBA(1, 1, 1, 0.95);
-      cr.arc(sx, sy, 4, 0, 2 * Math.PI);
-      cr.fill();
+      const ext = ExtensionUtils.getCurrentExtension();
+      const iconPath = GLib.build_filenamev([ext.path, 'icons', 'iss-symbolic.svg']);
+      const iconSize = ISS_ICON_SIZE;
+
+      if (Rsvg && GLib.file_test(iconPath, GLib.FileTest.EXISTS)) {
+        if (!_issIconSurface || _issIconSize !== iconSize || _issIconPath !== iconPath) {
+          try {
+            const handle = Rsvg.Handle.new_from_file(iconPath);
+            const dims = handle.get_dimensions ? handle.get_dimensions() : null;
+            const baseW = dims && dims.width ? dims.width : iconSize;
+            const baseH = dims && dims.height ? dims.height : iconSize;
+            _issIconSurface = new Cairo.ImageSurface(Cairo.Format.ARGB32, iconSize, iconSize);
+            const ctx = new Cairo.Context(_issIconSurface);
+            ctx.scale(iconSize / baseW, iconSize / baseH);
+            handle.render_cairo(ctx);
+            _issIconSize = iconSize;
+            _issIconPath = iconPath;
+          } catch (e) {
+            _issIconSurface = null;
+          }
+        }
+      }
+
+      if (_issIconSurface) {
+        const ix = sx - (iconSize / 2);
+        const iy = sy - (iconSize / 2);
+        cr.setSourceRGBA(1, 1, 1, 0.95);
+        cr.maskSurface(_issIconSurface, ix, iy);
+      } else {
+        cr.setSourceRGBA(1, 1, 1, 0.95);
+        cr.arc(sx, sy, 4, 0, 2 * Math.PI);
+        cr.fill();
+      }
     }
   }
 
