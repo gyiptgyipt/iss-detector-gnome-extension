@@ -50,6 +50,6 @@ Some display tweaks can be adjusted in `extension.js`:
 
 ## GNOME Extensions Submission
 I’ve submitted this extension to extensions.gnome.org. While it’s under review, you can install locally using the steps above.
-
+<!-- 
 ## License
-MIT (or your preferred license).
+MIT (or your preferred license). -->
