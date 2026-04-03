@@ -24,10 +24,13 @@ const CHECK_INTERVAL_SEC = 300; // 5 minutes
 const ISS_POSITION_INTERVAL_SEC = 30; // 30 seconds
 const LEAD_TIME_SEC = 600; // 10 minutes
 const API_COUNT = 5;
+const ISS_NOW_API_PRIMARY = 'https://api.wheretheiss.at/v1/satellites/25544';
+const ISS_NOW_API_FALLBACK = 'http://api.open-notify.org/iss-now.json';
 
 const MAP_WIDTH = 320;
 const MAP_HEIGHT = 180;
-const ISS_ICON_SIZE = 12;
+const ISS_ICON_SIZE = 24;
+const MAP_Y_OFFSET_PX = 0;
 const USE_360_LONGITUDE = false;
 const USE_SIMPLE_WATER_MAP = false;
 
@@ -35,7 +38,8 @@ let _timeoutId = 0;
 let _issTimerId = 0;
 let _session = null;
 let _simple = null;
-let _lastNotifiedRise = 0;
+let _lastNotifiedRise = 0;_FALLBACK = 'http://api.open-notify.org/iss-now.json';
+
 let _notifiedPermissionError = false;
 let _indicator = null;
 let _mapCanvas = null;
@@ -58,7 +62,7 @@ let _mapSurfacePath = '';
 let _mapBaseW = 0;
 let _mapBaseH = 0;
 let _issIconSurface = null;
-let _issIconSize = 0;
+let _issIconSize = 2;
 let _issIconPath = '';
 
 let _issHistory = [];
@@ -225,9 +229,48 @@ function _fetchIssPosition() {
   if (!_session)
     return;
 
-  const url = 'http://api.open-notify.org/iss-now.json';
-  const msg = Soup.Message.new('GET', url);
+  const msg = Soup.Message.new('GET', ISS_NOW_API_PRIMARY);
 
+  _session.queue_message(msg, (_session, message) => {
+    if (message.status_code !== Soup.KnownStatusCode.OK) {
+      _fetchIssPositionFallback();
+      return;
+    }
+
+    let data = null;
+    try {
+      data = JSON.parse(message.response_body.data);
+    } catch (e) {
+      _fetchIssPositionFallback();
+      return;
+    }
+
+    if (!data || !Number.isFinite(data.latitude) || !Number.isFinite(data.longitude) || !Number.isFinite(data.timestamp)) {
+      _fetchIssPositionFallback();
+      return;
+    }
+
+    const lat = Number.parseFloat(data.latitude);
+    const lon = Number.parseFloat(data.longitude);
+    const ts = Number.parseInt(data.timestamp, 10);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(ts))
+      return;
+
+    _issHistory.push({ lat, lon, ts });
+    _issLatest = { lat, lon, ts };
+    if (_issHistory.length > 360)
+      _issHistory.shift();
+
+    _updateIssStatus();
+    _invalidateMap();
+  });
+}
+
+function _fetchIssPositionFallback() {
+  if (!_session)
+    return;
+
+  const msg = Soup.Message.new('GET', ISS_NOW_API_FALLBACK);
   _session.queue_message(msg, (_session, message) => {
     if (message.status_code !== Soup.KnownStatusCode.OK)
       return;
@@ -393,8 +436,8 @@ function _drawMap(canvas, cr, width, height) {
   cr.paint();
 
   const ext = ExtensionUtils.getCurrentExtension();
-  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', 'map.png']);
-  const mapPathFallback = GLib.build_filenamev([ext.path, 'assets', 'world-map.svg']);
+  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', 'realistic-map.png']);
+  const mapPathFallback = GLib.build_filenamev([ext.path, 'assets', 'realistic-map.png']);
   const mapPath = GLib.file_test(mapPathPrimary, GLib.FileTest.EXISTS)
     ? mapPathPrimary
     : mapPathFallback;
@@ -518,7 +561,7 @@ function _drawMap(canvas, cr, width, height) {
       if (_issIconSurface) {
         const ix = sx - (iconSize / 2);
         const iy = sy - (iconSize / 2);
-        cr.setSourceRGBA(1, 1, 1, 0.95);
+        cr.setSourceRGBA(0, 0, 0, 0.95);
         cr.maskSurface(_issIconSurface, ix, iy);
       } else {
         cr.setSourceRGBA(1, 1, 1, 0.95);
@@ -541,7 +584,7 @@ function _lonToX(lon, width) {
 }
 
 function _latToY(lat, height) {
-  return (90 - lat) / 180 * height;
+  return (90 - lat) / 180 * height + MAP_Y_OFFSET_PX;
 }
 
 function _getCenter() {
