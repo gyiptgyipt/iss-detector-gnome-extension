@@ -26,11 +26,22 @@ const LEAD_TIME_SEC = 600; // 10 minutes
 const API_COUNT = 5;
 const ISS_NOW_API_PRIMARY = 'https://api.wheretheiss.at/v1/satellites/25544';
 const ISS_NOW_API_FALLBACK = 'http://api.open-notify.org/iss-now.json';
+const ISS_MAX_STALE_SEC = 120;
+const ISS_POSITIONS_API = 'https://api.wheretheiss.at/v1/satellites/25544/positions';
 
 const MAP_WIDTH = 320;
 const MAP_HEIGHT = 180;
 const ISS_ICON_SIZE = 24;
 const MAP_Y_OFFSET_PX = 0;
+const MAP_IMAGE_Y_OFFSET_PX = -14; //virtual offset by me
+const MAP_ZOOM_MIN = 1.0;
+const MAP_ZOOM_MAX = 4.0;
+const MAP_ZOOM_STEP = 0.2;
+const ORBIT_DURATION_SEC = 5580;
+const TRAJECTORY_SAMPLE_SEC = 30;
+const TRAJECTORY_REFRESH_SEC = 600;
+const EARTH_RADIUS_KM = 6371;
+const DEFAULT_ISS_ALTITUDE_KM = 420;
 const USE_360_LONGITUDE = false;
 const USE_SIMPLE_WATER_MAP = false;
 
@@ -38,15 +49,17 @@ let _timeoutId = 0;
 let _issTimerId = 0;
 let _session = null;
 let _simple = null;
-let _lastNotifiedRise = 0;_FALLBACK = 'http://api.open-notify.org/iss-now.json';
+let _lastNotifiedRise = 0;
 
 let _notifiedPermissionError = false;
 let _indicator = null;
 let _mapCanvas = null;
 let _mapActor = null;
+let _mapContainer = null;
 let _timeLabel = null;
 let _statusLabel = null;
 let _countdownLabel = null;
+let _issStatsLabel = null;
 let _nextPass = null;
 let _latEntry = null;
 let _lonEntry = null;
@@ -62,8 +75,20 @@ let _mapSurfacePath = '';
 let _mapBaseW = 0;
 let _mapBaseH = 0;
 let _issIconSurface = null;
-let _issIconSize = 2;
+let _issIconSize = 0;
 let _issIconPath = '';
+let _mapZoom = 1.0;
+let _mapPanX = 0;
+let _mapPanY = 0;
+let _draggingMap = false;
+let _dragStartX = 0;
+let _dragStartY = 0;
+let _dragStartPanX = 0;
+let _dragStartPanY = 0;
+let _useRealisticMap = false;
+let _issFuturePath = [];
+let _issFutureStartTs = 0;
+let _issFutureUpdatedAt = 0;
 
 let _issHistory = [];
 let _issLatest = null;
@@ -123,9 +148,11 @@ function disable() {
 
   _mapCanvas = null;
   _mapActor = null;
+  _mapContainer = null;
   _timeLabel = null;
   _statusLabel = null;
   _countdownLabel = null;
+  _issStatsLabel = null;
   _latEntry = null;
   _lonEntry = null;
   _nextPass = null;
@@ -144,6 +171,18 @@ function disable() {
   _issIconSurface = null;
   _issIconSize = 0;
   _issIconPath = '';
+  _mapZoom = 1.0;
+  _mapPanX = 0;
+  _mapPanY = 0;
+  _draggingMap = false;
+  _dragStartX = 0;
+  _dragStartY = 0;
+  _dragStartPanX = 0;
+  _dragStartPanY = 0;
+  _useRealisticMap = false;
+  _issFuturePath = [];
+  _issFutureStartTs = 0;
+  _issFutureUpdatedAt = 0;
   _lastNotifiedRise = 0;
   _notifiedPermissionError = false;
 }
@@ -175,25 +214,36 @@ function _checkPasses() {
     return;
 
   const center = _getCenter();
-  if (!center)
+  if (!center) {
+    if (_timeLabel)
+      _timeLabel.text = 'Next pass: set location and press Use';
     return;
+  }
 
-  const url = `https://api.open-notify.org/iss-pass.json?lat=${center.lat}&lon=${center.lon}&n=${API_COUNT}`;
+  const url = `http://api.open-notify.org/iss-pass.json?lat=${center.lat}&lon=${center.lon}&n=${API_COUNT}`;
   const msg = Soup.Message.new('GET', url);
 
   _session.queue_message(msg, (_session, message) => {
-    if (message.status_code !== Soup.KnownStatusCode.OK)
+    if (message.status_code !== Soup.KnownStatusCode.OK) {
+      if (_timeLabel)
+        _timeLabel.text = `Next pass: API error (${message.status_code})`;
       return;
+    }
 
     let data = null;
     try {
       data = JSON.parse(message.response_body.data);
     } catch (e) {
+      if (_timeLabel)
+        _timeLabel.text = 'Next pass: invalid response';
       return;
     }
 
-    if (!data || data.message !== 'success' || !Array.isArray(data.response))
+    if (!data || data.message !== 'success' || !Array.isArray(data.response)) {
+      if (_timeLabel)
+        _timeLabel.text = 'Next pass: unavailable';
       return;
+    }
 
     _maybeNotify(data.response);
     _updateNextPass(data.response);
@@ -229,7 +279,10 @@ function _fetchIssPosition() {
   if (!_session)
     return;
 
-  const msg = Soup.Message.new('GET', ISS_NOW_API_PRIMARY);
+  const url = _withCacheBust(ISS_NOW_API_PRIMARY);
+  const msg = Soup.Message.new('GET', url);
+  msg.request_headers.append('Cache-Control', 'no-cache');
+  msg.request_headers.append('Pragma', 'no-cache');
 
   _session.queue_message(msg, (_session, message) => {
     if (message.status_code !== Soup.KnownStatusCode.OK) {
@@ -253,11 +306,29 @@ function _fetchIssPosition() {
     const lat = Number.parseFloat(data.latitude);
     const lon = Number.parseFloat(data.longitude);
     const ts = Number.parseInt(data.timestamp, 10);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(ts))
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(ts)) {
+      _fetchIssPositionFallback();
       return;
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSec - ts) > ISS_MAX_STALE_SEC) {
+      _fetchIssPositionFallback();
+      return;
+    }
+
+    const altitude = Number.parseFloat(data.altitude);
+    const velocity = Number.parseFloat(data.velocity);
 
     _issHistory.push({ lat, lon, ts });
-    _issLatest = { lat, lon, ts };
+    _issLatest = {
+      lat,
+      lon,
+      ts,
+      altitude: Number.isFinite(altitude) ? altitude : null,
+      velocity: Number.isFinite(velocity) ? velocity : null,
+    };
+    _maybeUpdateFuturePath(ts);
     if (_issHistory.length > 360)
       _issHistory.shift();
 
@@ -270,7 +341,10 @@ function _fetchIssPositionFallback() {
   if (!_session)
     return;
 
-  const msg = Soup.Message.new('GET', ISS_NOW_API_FALLBACK);
+  const url = _withCacheBust(ISS_NOW_API_FALLBACK);
+  const msg = Soup.Message.new('GET', url);
+  msg.request_headers.append('Cache-Control', 'no-cache');
+  msg.request_headers.append('Pragma', 'no-cache');
   _session.queue_message(msg, (_session, message) => {
     if (message.status_code !== Soup.KnownStatusCode.OK)
       return;
@@ -291,8 +365,13 @@ function _fetchIssPositionFallback() {
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(ts))
       return;
 
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSec - ts) > ISS_MAX_STALE_SEC)
+      return;
+
     _issHistory.push({ lat, lon, ts });
-    _issLatest = { lat, lon, ts };
+    _issLatest = { lat, lon, ts, altitude: null, velocity: null };
+    _maybeUpdateFuturePath(ts);
     if (_issHistory.length > 360)
       _issHistory.shift();
 
@@ -351,16 +430,55 @@ function _createIndicator() {
     x_expand: true,
     y_expand: false,
     style_class: 'iss-map',
+    reactive: true,
   });
   _mapCanvas = new Clutter.Canvas();
   _mapCanvas.set_size(MAP_WIDTH, MAP_HEIGHT);
   _mapCanvas.connect('draw', _drawMap);
   _mapActor.set_content(_mapCanvas);
 
+  _mapContainer = new St.Widget({
+    width: MAP_WIDTH,
+    height: MAP_HEIGHT,
+    x_expand: true,
+    y_expand: false,
+    layout_manager: new Clutter.BinLayout(),
+  });
+  _mapContainer.add_child(_mapActor);
+
+  const mapToggleBtn = new St.Button({
+    label: 'Toggle Map',
+    style_class: 'iss-detector-button',
+    x_align: Clutter.ActorAlign.END,
+    y_align: Clutter.ActorAlign.END,
+  });
+  mapToggleBtn.set_style('margin: 6px;');
+  mapToggleBtn.connect('clicked', () => {
+    _useRealisticMap = !_useRealisticMap;
+    _mapPixbuf = null;
+    _mapSurface = null;
+    _mapSurfaceW = 0;
+    _mapSurfaceH = 0;
+    _mapSurfacePath = '';
+    _invalidateMap();
+  });
+  _mapContainer.add_child(mapToggleBtn);
+
   box.add_child(headerBox);
   box.add_child(_statusLabel);
   box.add_child(formBox);
-  box.add_child(_mapActor);
+  box.add_child(_mapContainer);
+
+  const zoomBox = new St.BoxLayout({ vertical: false, style_class: 'iss-detector-form' });
+  const zoomInBtn = new St.Button({ label: '+', style_class: 'iss-detector-button' });
+  const zoomOutBtn = new St.Button({ label: '-', style_class: 'iss-detector-button' });
+  zoomInBtn.connect('clicked', () => _setMapZoom(_mapZoom + MAP_ZOOM_STEP, MAP_WIDTH / 2, MAP_HEIGHT / 2));
+  zoomOutBtn.connect('clicked', () => _setMapZoom(_mapZoom - MAP_ZOOM_STEP, MAP_WIDTH / 2, MAP_HEIGHT / 2));
+  zoomBox.add_child(zoomInBtn);
+  zoomBox.add_child(zoomOutBtn);
+  _issStatsLabel = new St.Label({ text: 'H: -- km  V: -- km/h', style_class: 'iss-status', x_align: Clutter.ActorAlign.START });
+  zoomBox.add_child(_issStatsLabel);
+  box.add_child(zoomBox);
 
   const item = new imports.ui.popupMenu.PopupBaseMenuItem({ reactive: false, can_focus: false });
   item.add_child(box);
@@ -376,6 +494,54 @@ function _createIndicator() {
 
   Main.panel.addToStatusArea('iss-detector', _indicator);
   _invalidateMap();
+
+  _mapActor.connect('scroll-event', (_actor, event) => {
+    const dir = event.get_scroll_direction();
+    let delta = 0;
+    if (dir === Clutter.ScrollDirection.UP) {
+      delta = MAP_ZOOM_STEP;
+    } else if (dir === Clutter.ScrollDirection.DOWN) {
+      delta = -MAP_ZOOM_STEP;
+    } else if (dir === Clutter.ScrollDirection.SMOOTH) {
+      const [, dy] = event.get_scroll_delta();
+      delta = dy < 0 ? MAP_ZOOM_STEP : (dy > 0 ? -MAP_ZOOM_STEP : 0);
+    }
+    if (delta !== 0) {
+      const [x, y] = event.get_coords();
+      _setMapZoom(_mapZoom + delta, x, y);
+    }
+    return Clutter.EVENT_STOP;
+  });
+
+  _mapActor.connect('button-press-event', (_actor, event) => {
+    if (event.get_button() !== 1)
+      return Clutter.EVENT_PROPAGATE;
+    const [x, y] = event.get_coords();
+    _draggingMap = true;
+    _dragStartX = x;
+    _dragStartY = y;
+    _dragStartPanX = _mapPanX;
+    _dragStartPanY = _mapPanY;
+    return Clutter.EVENT_STOP;
+  });
+
+  _mapActor.connect('button-release-event', (_actor, event) => {
+    if (event.get_button() !== 1)
+      return Clutter.EVENT_PROPAGATE;
+    _draggingMap = false;
+    return Clutter.EVENT_STOP;
+  });
+
+  _mapActor.connect('motion-event', (_actor, event) => {
+    if (!_draggingMap)
+      return Clutter.EVENT_PROPAGATE;
+    const [x, y] = event.get_coords();
+    _mapPanX = _dragStartPanX + (x - _dragStartX);
+    _mapPanY = _dragStartPanY + (y - _dragStartY);
+    _clampMapPan(MAP_WIDTH, MAP_HEIGHT);
+    _invalidateMap();
+    return Clutter.EVENT_STOP;
+  });
 }
 
 function _setStatus(text) {
@@ -391,6 +557,11 @@ function _updateIssStatus() {
   const latStr = _issLatest.lat.toFixed(4);
   const lonStr = _issLatest.lon.toFixed(4);
   _statusLabel.text = `ISS: ${latStr}, ${lonStr} @ ${timeStr}`;
+  if (_issStatsLabel) {
+    const h = Number.isFinite(_issLatest.altitude) ? `${_issLatest.altitude.toFixed(1)} km` : '-- km';
+    const v = Number.isFinite(_issLatest.velocity) ? `${_issLatest.velocity.toFixed(1)} km/h` : '-- km/h';
+    _issStatsLabel.text = `Height: ${h}  Velocity: ${v}`;
+  }
 }
 
 function _updateNextPass(passes) {
@@ -431,13 +602,149 @@ function _invalidateMap() {
     _mapCanvas.invalidate();
 }
 
+function _clampMapPan(width, height) {
+  const scaledW = width * _mapZoom;
+  const scaledH = height * _mapZoom;
+  const minX = width - scaledW;
+  const minY = height - scaledH;
+  if (_mapPanX > 0)
+    _mapPanX = 0;
+  if (_mapPanY > 0)
+    _mapPanY = 0;
+  if (_mapPanX < minX)
+    _mapPanX = minX;
+  if (_mapPanY < minY)
+    _mapPanY = minY;
+}
+
+function _setMapZoom(newZoom, focusX, focusY) {
+  const clamped = Math.max(MAP_ZOOM_MIN, Math.min(MAP_ZOOM_MAX, newZoom));
+  if (clamped === _mapZoom)
+    return;
+  const oldZoom = _mapZoom;
+  if (Number.isFinite(focusX) && Number.isFinite(focusY)) {
+    const factor = clamped / oldZoom;
+    _mapPanX = focusX - ((focusX - _mapPanX) * factor);
+    _mapPanY = focusY - ((focusY - _mapPanY) * factor);
+  }
+  _mapZoom = clamped;
+  _clampMapPan(MAP_WIDTH, MAP_HEIGHT);
+  _invalidateMap();
+}
+
+function _withCacheBust(baseUrl) {
+  const sep = baseUrl.includes('?') ? '&' : '?';
+  return `${baseUrl}${sep}_=${Date.now()}`;
+}
+
+function _getVisibilityRadiusKm(altitudeKm) {
+  const alt = Number.isFinite(altitudeKm) ? altitudeKm : DEFAULT_ISS_ALTITUDE_KM;
+  const ratio = EARTH_RADIUS_KM / (EARTH_RADIUS_KM + alt);
+  const centralAngle = Math.acos(Math.max(-1, Math.min(1, ratio)));
+  return EARTH_RADIUS_KM * centralAngle;
+}
+
+function _haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function _maybeUpdateFuturePath(baseTs) {
+  if (!Number.isFinite(baseTs))
+    return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (_issFutureUpdatedAt && (nowSec - _issFutureUpdatedAt) < TRAJECTORY_REFRESH_SEC)
+    return;
+  _fetchIssFuturePath(baseTs);
+}
+
+function _fetchIssFuturePath(baseTs) {
+  if (!_session)
+    return;
+  const start = Number.isFinite(baseTs) ? baseTs : Math.floor(Date.now() / 1000);
+  const timestamps = [];
+  for (let t = start; t <= start + ORBIT_DURATION_SEC; t += TRAJECTORY_SAMPLE_SEC)
+    timestamps.push(t);
+
+  _issFuturePath = [];
+  _issFutureStartTs = start;
+  _issFutureUpdatedAt = Math.floor(Date.now() / 1000);
+
+  const batchSize = 10;
+  const batches = [];
+  for (let i = 0; i < timestamps.length; i += batchSize)
+    batches.push(timestamps.slice(i, i + batchSize));
+
+  const fetchBatch = (index) => {
+    if (index >= batches.length) {
+      _issFuturePath.sort((a, b) => a.ts - b.ts);
+      _invalidateMap();
+      return;
+    }
+    const batch = batches[index];
+    const url = _withCacheBust(`${ISS_POSITIONS_API}?timestamps=${batch.join(',')}`);
+    const msg = Soup.Message.new('GET', url);
+    msg.request_headers.append('Cache-Control', 'no-cache');
+    msg.request_headers.append('Pragma', 'no-cache');
+    _session.queue_message(msg, (_session, message) => {
+      if (message.status_code !== Soup.KnownStatusCode.OK) {
+        fetchBatch(index + 1);
+        return;
+      }
+      let data = null;
+      try {
+        data = JSON.parse(message.response_body.data);
+      } catch (e) {
+        fetchBatch(index + 1);
+        return;
+      }
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          if (!item)
+            continue;
+          const lat = Number.parseFloat(item.latitude);
+          const lon = Number.parseFloat(item.longitude);
+          const ts = Number.parseInt(item.timestamp, 10);
+          if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(ts))
+            _issFuturePath.push({ lat, lon, ts });
+        }
+      }
+      fetchBatch(index + 1);
+    });
+  };
+
+  fetchBatch(0);
+}
+
 function _drawMap(canvas, cr, width, height) {
   cr.setSourceRGBA(0, 0, 0, 0);
   cr.paint();
 
+  cr.save();
+  cr.rectangle(0, 0, width, height);
+  cr.clip();
+
+  _clampMapPan(width, height);
+  cr.save();
+  cr.translate(_mapPanX, _mapPanY);
+  cr.scale(_mapZoom, _mapZoom);
+
+  cr.save();
+  cr.setSourceRGBA(0.45, 0.67, 0.86, 1);
+  cr.rectangle(0, 0, width, height);
+  cr.fill();
+  cr.restore();
+
+  cr.save();
+  cr.translate(0, MAP_IMAGE_Y_OFFSET_PX);
   const ext = ExtensionUtils.getCurrentExtension();
-  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', 'realistic-map.png']);
-  const mapPathFallback = GLib.build_filenamev([ext.path, 'assets', 'realistic-map.png']);
+  const mapFile = _useRealisticMap ? 'realistic-map.png' : 'map.png';
+  const mapPathPrimary = GLib.build_filenamev([ext.path, 'assets', mapFile]);
+  const mapPathFallback = GLib.build_filenamev([ext.path, 'assets', 'world-map.svg']);
   const mapPath = GLib.file_test(mapPathPrimary, GLib.FileTest.EXISTS)
     ? mapPathPrimary
     : mapPathFallback;
@@ -473,6 +780,9 @@ function _drawMap(canvas, cr, width, height) {
         cr.setFontSize(12);
         cr.moveTo(10, 20);
         cr.showText('GdkPixbuf not available.');
+        cr.restore();
+        cr.restore();
+        cr.restore();
         return true;
       }
       if (!_mapPixbuf) {
@@ -487,18 +797,40 @@ function _drawMap(canvas, cr, width, height) {
       }
     }
   } catch (e) {
+    cr.restore();
+    cr.restore();
+    cr.restore();
     cr.setSourceRGBA(0.15, 0.17, 0.2, 1);
     cr.rectangle(0, 0, width, height);
     cr.fill();
     return true;
   }
+  cr.restore();
 
-  // Draw ISS ground track and current position in equirectangular projection
-  if (_issHistory.length > 1) {
+  // Draw visibility circle for the observer location and ISS footprint
+  const center = _getCenter();
+  const altitudeKm = _issLatest && Number.isFinite(_issLatest.altitude)
+    ? _issLatest.altitude
+    : DEFAULT_ISS_ALTITUDE_KM;
+  const radiusKm = _getVisibilityRadiusKm(altitudeKm);
+  const radiusDeg = radiusKm / 111.32;
+  const radiusPx = radiusDeg * (height / 180);
+
+  if (center && Number.isFinite(radiusPx) && radiusPx > 0) {
+    const cx = _lonToX(center.lon, width);
+    const cy = _latToY(center.lat, height);
+    cr.setLineWidth(1.5);
+    cr.setSourceRGBA(1, 1, 1, 0.35);
+    cr.arc(cx, cy, radiusPx, 0, 2 * Math.PI);
+    cr.stroke();
+  }
+
+  // Draw future trajectory (full orbit) and current position in equirectangular projection
+  if (_issFuturePath.length > 1) {
     cr.setLineWidth(2);
     cr.setSourceRGBA(1, 0.3, 0.3, 0.9);
     let prev = null;
-    for (const pt of _issHistory) {
+    for (const pt of _issFuturePath) {
       const sx = _lonToX(pt.lon, width);
       const sy = _latToY(pt.lat, height);
       if (!prev) {
@@ -530,11 +862,36 @@ function _drawMap(canvas, cr, width, height) {
       prev = pt;
     }
     cr.stroke();
+  }
 
+  if (_issHistory.length > 0) {
     const last = _issHistory[_issHistory.length - 1];
     if (last) {
       const sx = _lonToX(last.lon, width);
       const sy = _latToY(last.lat, height);
+
+      if (Number.isFinite(radiusPx) && radiusPx > 0) {
+        // ISS visibility footprint
+        cr.setLineWidth(1.2);
+        cr.setSourceRGBA(1, 0.8, 0.2, 0.35);
+        cr.arc(sx, sy, radiusPx, 0, 2 * Math.PI);
+        cr.stroke();
+
+        // Line from observer to ISS when within visibility radius
+        const center = _getCenter();
+        if (center) {
+          const distanceKm = _haversineKm(center.lat, center.lon, last.lat, last.lon);
+          if (distanceKm <= radiusKm) {
+            const cx = _lonToX(center.lon, width);
+            const cy = _latToY(center.lat, height);
+            cr.setLineWidth(1.5);
+            cr.setSourceRGBA(1, 0.8, 0.2, 0.6);
+            cr.moveTo(cx, cy);
+            cr.lineTo(sx, sy);
+            cr.stroke();
+          }
+        }
+      }
       const ext = ExtensionUtils.getCurrentExtension();
       const iconPath = GLib.build_filenamev([ext.path, 'icons', 'iss-symbolic.svg']);
       const iconSize = ISS_ICON_SIZE;
@@ -571,6 +928,8 @@ function _drawMap(canvas, cr, width, height) {
     }
   }
 
+  cr.restore();
+  cr.restore();
   return true;
 }
 
