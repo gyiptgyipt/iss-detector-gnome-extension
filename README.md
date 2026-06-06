@@ -36,7 +36,7 @@ If you see `Next pass: API error (404)`, the Open‑Notify pass endpoint is unav
 1. Clone this repo into your local extensions directory:
    - `git clone git@github.com:gyiptgyipt/iss-detector-gnome-extension.git ~/.local/share/gnome-shell/extensions/iss-detector`
 2. Rename the folder to match the extension UUID:
-   - `mv ~/.local/share/gnome-shell/extensions/iss-detector ~/.local/share/gnome-shell/extensions/iss-detector@gyiptgyipt.github.io`
+   - `mv ~/.local/share/gnome-shell/extensions/iss-detector ~/.local/share/gnome-shell/extensions/iss-detector@gyiptgyipt.github.io` #TO CHECK NAME
 3. Restart GNOME Shell:
    - On X11: press `Alt+F2`, type `r`, press Enter
 4. Enable it in the **Extensions** app.
