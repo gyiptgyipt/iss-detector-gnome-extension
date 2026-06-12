@@ -1,6 +1,6 @@
 /* exported init enable disable */
 
-const { GLib, Soup, Geoclue, Gio, Clutter, St, GdkPixbuf } = imports.gi;
+const { GLib, Soup, Geoclue, Gio, Clutter, St } = imports.gi;
 const Cairo = imports.cairo;
 let Rsvg = null;
 try {
@@ -8,17 +8,10 @@ try {
 } catch (e) {
   Rsvg = null;
 }
-let Gdk = null;
-try {
-  Gdk = imports.gi.Gdk;
-} catch (e) {
-  Gdk = null;
-}
 
 const Main = imports.ui.main;
 const PanelMenu = imports.ui.panelMenu;
 const ExtensionUtils = imports.misc.extensionUtils;
-const ThemeContext = St.ThemeContext;
 
 const CHECK_INTERVAL_SEC = 300; // 5 minutes
 const ISS_POSITION_INTERVAL_SEC = 30; // 30 seconds
@@ -66,8 +59,6 @@ let _lonEntry = null;
 let _useManualLocation = false;
 let _manualLat = null;
 let _manualLon = null;
-let _styleSheet = null;
-let _mapPixbuf = null;
 let _mapSurface = null;
 let _mapSurfaceW = 0;
 let _mapSurfaceH = 0;
@@ -100,7 +91,6 @@ function init() {}
 
 function enable() {
   _session = new Soup.Session();
-  _loadStyles();
   _createIndicator();
   _loadManualLocation();
   if (!_useManualLocation)
@@ -144,8 +134,6 @@ function disable() {
     _indicator = null;
   }
 
-  _unloadStyles();
-
   _mapCanvas = null;
   _mapActor = null;
   _mapContainer = null;
@@ -161,7 +149,6 @@ function disable() {
   _manualLon = null;
   _issHistory = [];
   _issLatest = null;
-  _mapPixbuf = null;
   _mapSurface = null;
   _mapSurfaceW = 0;
   _mapSurfaceH = 0;
@@ -384,7 +371,6 @@ function _createIndicator() {
   const ext = ExtensionUtils.getCurrentExtension();
   const iconPath = GLib.build_filenamev([ext.path, 'icons', 'iss-symbolic.svg']);
   const gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(iconPath) });
-  _mapPixbuf = null;
 
   _indicator = new PanelMenu.Button(0.0, 'ISS Detector');
   const icon = new St.Icon({ gicon, style_class: 'system-status-icon' });
@@ -455,7 +441,6 @@ function _createIndicator() {
   mapToggleBtn.set_style('margin: 6px;');
   mapToggleBtn.connect('clicked', () => {
     _useRealisticMap = !_useRealisticMap;
-    _mapPixbuf = null;
     _mapSurface = null;
     _mapSurfaceW = 0;
     _mapSurfaceH = 0;
@@ -774,27 +759,21 @@ function _drawMap(canvas, cr, width, height) {
       cr.setSourceSurface(_mapSurface, 0, 0);
       cr.paint();
     } else {
-      if (!GdkPixbuf) {
-        cr.setSourceRGBA(1, 1, 1, 0.6);
-        cr.selectFontFace('Sans', 0, 0);
-        cr.setFontSize(12);
-        cr.moveTo(10, 20);
-        cr.showText('GdkPixbuf not available.');
-        cr.restore();
-        cr.restore();
-        cr.restore();
-        return true;
+      if (!_mapSurface || _mapSurfaceW !== width || _mapSurfaceH !== height || _mapSurfacePath !== mapPath) {
+        const base = Cairo.ImageSurface.createFromPNG(mapPath);
+        _mapBaseW = base.getWidth();
+        _mapBaseH = base.getHeight();
+        _mapSurface = new Cairo.ImageSurface(Cairo.Format.ARGB32, width, height);
+        const ctx = new Cairo.Context(_mapSurface);
+        ctx.scale(width / _mapBaseW, height / _mapBaseH);
+        ctx.setSourceSurface(base, 0, 0);
+        ctx.paint();
+        _mapSurfaceW = width;
+        _mapSurfaceH = height;
+        _mapSurfacePath = mapPath;
       }
-      if (!_mapPixbuf) {
-        const base = GdkPixbuf.Pixbuf.new_from_file(mapPath);
-        _mapBaseW = base.get_width();
-        _mapBaseH = base.get_height();
-        _mapPixbuf = base.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR);
-      }
-      if (Gdk && _mapPixbuf) {
-        Gdk.cairo_set_source_pixbuf(cr, _mapPixbuf, 0, 0);
-        cr.paint();
-      }
+      cr.setSourceSurface(_mapSurface, 0, 0);
+      cr.paint();
     }
   } catch (e) {
     cr.restore();
@@ -1026,26 +1005,4 @@ function _formatCountdown(seconds) {
   if (h > 0)
     return `${h}h ${m}m`;
   return `${m}m`;
-}
-
-function _loadStyles() {
-  try {
-    const ext = ExtensionUtils.getCurrentExtension();
-    const cssPath = GLib.build_filenamev([ext.path, 'stylesheet.css']);
-    _styleSheet = Gio.File.new_for_path(cssPath);
-    ThemeContext.get_for_stage(global.stage).get_theme().load_stylesheet(_styleSheet);
-  } catch (e) {
-    // Ignore style load errors
-  }
-}
-
-function _unloadStyles() {
-  try {
-    if (_styleSheet) {
-      ThemeContext.get_for_stage(global.stage).get_theme().unload_stylesheet(_styleSheet);
-      _styleSheet = null;
-    }
-  } catch (e) {
-    // Ignore style unload errors
-  }
 }
