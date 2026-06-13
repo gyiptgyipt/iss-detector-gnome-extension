@@ -2,9 +2,9 @@
   "uuid": "iss-detector@gyiptgyipt.github.io",
   "name": "ISS Detector",
   "description": "Notify you 10 minutes before the ISS passes overhead (manual or dynamic location).",
-  "version": 1,
+  "version": 2,
   "shell-version": ["42"],
   "donations": {
-    "github": "gyiptgyipt"
+    "custom": "https://ko-fi.com/zyme_gg"
   }
 }
