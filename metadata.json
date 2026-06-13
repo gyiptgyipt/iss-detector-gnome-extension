@@ -1,5 +1,5 @@
 {
-  "uuid": "iss-detector@gyiptgyipt.github.io",
+  "uuid": "iss-detector@https://gyiptgyipt.github.io/",
   "name": "ISS Detector",
   "description": "Notify you 10 minutes before the ISS passes overhead (manual or dynamic location).",
   "version": 2,
