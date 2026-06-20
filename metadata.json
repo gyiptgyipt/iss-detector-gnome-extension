@@ -4,7 +4,7 @@
   "description": "Notify you 10 minutes before the ISS passes overhead (manual or dynamic location).",
   "version": 6,
   "shell-version": ["42"],
-  "url": "git@github.com:gyiptgyipt/iss-detector-gnome-extension.git",
+  "url": "https://github.com/gyiptgyipt/iss-detector-gnome-extension",
   "donations": {
     "kofi": "zyme_gg"
   }
